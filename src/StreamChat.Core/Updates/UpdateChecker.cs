@@ -8,13 +8,13 @@ public enum UpdateState { Failed, NoReleases, UpToDate, Available }
 
 public sealed record UpdateResult(UpdateState State, string Version = "");
 
-/// <summary>Только сообщает о новой версии: ничего не качает и не запускает.</summary>
+/// <summary>Только узнаёт номер последней версии; скачивает её UpdateDownloader.</summary>
 public sealed partial class UpdateChecker : IDisposable
 {
     /// <summary>Адрес постоянный: ссылке из ответа сервера не верим.</summary>
-    public const string DownloadPage = "https://github.com/On1Samurai/stream-chat-overlay/releases/latest";
+    public static readonly string DownloadPage = $"https://github.com/{UpdateRepository.Name}/releases/latest";
 
-    private const string Latest = "https://api.github.com/repos/On1Samurai/stream-chat-overlay/releases/latest";
+    private static readonly string Latest = $"https://api.github.com/repos/{UpdateRepository.Name}/releases/latest";
 
     private readonly HttpClient _http = new(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false })
     {

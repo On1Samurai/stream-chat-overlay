@@ -28,7 +28,7 @@
   - `Rules/`: выделение и фильтр. Деньги фильтр не прячет.
   - `Obs/`: obs-websocket 5, только чтение.
   - `Donations/`: официальный API DonationAlerts, вход OAuth implicit через localhost. Секрета в exe нет.
-  - `Updates/`: только уведомление о выпуске GitHub, без скачивания и запуска.
+  - `Updates/`: проверка выпуска GitHub, скачивание с проверкой подписи и замена exe. Обновление ставится только по кнопке. Что оно не начнётся во время эфира или записи, гарантировано, только когда OBS подключена к StreamChat: без OBS программа эфира не видит.
   - `Viewers/`: число зрителей. Twitch через DecAPI (Helix требует токен), YouTube через `videos.list`, TikTok из `roomUser`.
   - `Emotes/`: встроенный набор Twemoji, эмоуты Twitch, 7TV, BTTV, FFZ. Качаем только с известных CDN, без перенаправлений.
   - `Chat/TwitchClient`: анонимный IRC по WebSocket (`justinfan`), переподключение, обнаружение молчаливого обрыва.

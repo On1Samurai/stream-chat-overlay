@@ -38,6 +38,9 @@ public sealed class ObsBoard
     /// <summary>Идёт эфир или запись.</summary>
     public bool IsOnAir(TimeSpan now) => Current(now) is { } s && (s.Streaming || (s.Recording && !s.RecordPaused));
 
+    /// <summary>OBS известна и нет ни эфира, ни записи (пауза записи тоже запись).</summary>
+    public bool IsIdle(TimeSpan now) => Current(now) is { } s && !s.Streaming && !s.Reconnecting && !s.Recording;
+
     public IReadOnlyList<StatusItem> Items(TimeSpan now)
     {
         // старые данные нельзя выдавать за «всё хорошо»

@@ -27,14 +27,15 @@ internal sealed class Tray : IDisposable
     private readonly Forms.ToolStripMenuItem _youTube = new("YouTube: не настроен") { Enabled = false };
     private readonly Forms.ToolStripMenuItem _tikTok = new("TikTok: не настроен") { Enabled = false };
     private readonly Forms.ToolStripMenuItem _donations = new("DonationAlerts: вход не выполнен") { Enabled = false };
-    private readonly Forms.ToolStripMenuItem _update = new() { Enabled = false, Visible = false };
+    private readonly Forms.ToolStripMenuItem _update = new() { Enabled = true, Visible = false };
     private readonly Forms.ToolStripMenuItem _profiles = new("Профиль игры") { Visible = false };
     private readonly Action<string> _switchProfile;
 
     public Tray(Action openSettings, Action reconnect, Action testMessage, Action<Position> setPosition, Action toggleEditing, Action toggleHidden,
-        Action<string> switchProfile, Action exit)
+        Action<string> switchProfile, Action openUpdate, Action exit)
     {
         _switchProfile = switchProfile;
+        _update.Click += (_, _) => openUpdate();
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add(_status);
         menu.Items.Add(_twitch);
@@ -105,7 +106,7 @@ internal sealed class Tray : IDisposable
 
     public void SetUpdate(string version)
     {
-        _update.Text = $"Вышла версия {version}: см. настройки";
+        _update.Text = $"Вышла версия {version}: обновить";
         _update.Visible = version.Length > 0;
     }
 

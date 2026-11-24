@@ -36,4 +36,20 @@ public class UpdateTests
 
     [Fact]
     public void Not_json_is_a_failure() => Assert.Equal(UpdateState.Failed, UpdateChecker.Parse("1.0.0", 200, "<html>").State);
+
+    [Fact]
+    public void Default_repository_is_the_release_one() => Assert.Equal("On1Samurai/stream-chat-overlay", UpdateRepository.Name);
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("evil")]
+    [InlineData("a/b/c")]
+    [InlineData("a/b c")]
+    [InlineData("a/b\n")]
+    [InlineData("a@b/c")]
+    public void Bad_repository_falls_back(string? value) => Assert.Equal(UpdateRepository.Default, UpdateRepository.Pick(value));
+
+    [Fact]
+    public void Good_repository_is_kept() => Assert.Equal("On1Samurai/stream-chat-overlay-update-test", UpdateRepository.Pick("On1Samurai/stream-chat-overlay-update-test"));
 }

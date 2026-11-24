@@ -168,6 +168,18 @@ public class ObsBoardTests
     private static StatusItem Item(ObsBoard board, string label, double now = 0) => board.Items(At(now)).Single(i => i.Label == label);
 
     [Fact]
+    public void Paused_recording_is_not_idle()
+    {
+        var board = new ObsBoard();
+        board.Update(new ObsSnapshot(false, false, TimeSpan.Zero, 0, 0, true, true, MicState.On), At(0));
+        Assert.False(board.IsIdle(At(0)));
+        board.Update(new ObsSnapshot(false, false, TimeSpan.Zero, 0, 0, false, false, MicState.On), At(1));
+        Assert.True(board.IsIdle(At(1)));
+        board.Forget();
+        Assert.False(board.IsIdle(At(1)));
+    }
+
+    [Fact]
     public void Live_shows_duration()
     {
         var board = new ObsBoard();
@@ -238,6 +250,14 @@ public class ObsBoardTests
         board.Update(Live(skipped: 500, total: 2000), At(2));
         for (var t = 4; t <= 40; t += 2) board.Update(Live(skipped: 500, total: 2000 + t * 60), At(t));
         Assert.DoesNotContain(board.Items(At(40)), i => i.Label == "ПОТЕРИ");
+    }
+
+    [Fact]
+    public void Reconnecting_is_not_idle()
+    {
+        var board = new ObsBoard();
+        board.Update(new ObsSnapshot(false, true, TimeSpan.Zero, 0, 0, false, false, MicState.On), At(0));
+        Assert.False(board.IsIdle(At(0)));
     }
 
     [Fact]

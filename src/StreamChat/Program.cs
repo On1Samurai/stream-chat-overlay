@@ -1,4 +1,7 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows;
+using StreamChat.Core.Updates;
 
 namespace StreamChat;
 
@@ -7,8 +10,16 @@ internal static class Program
     private const string InstanceSignal = @"Local\StreamChat.Show";
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        // новая версия после обновления: старая ещё закрывается, иначе приняли бы её за второй экземпляр
+        var afterUpdate = false;
+        if (args is ["--after-update", var pidText] && int.TryParse(pidText, out var pid) && pid != Environment.ProcessId)
+        {
+            afterUpdate = true;
+            WaitForExit(pid);
+        }
+
         // зависшее окно Windows подменяет своей копией, а на копию защита от захвата не переносится
         NativeMethods.DisableProcessWindowsGhosting();
 
@@ -17,6 +28,13 @@ internal static class Program
         try
         {
             instance = new EventWaitHandle(false, EventResetMode.AutoReset, InstanceSignal, out first);
+            // старая версия ещё держит событие: ждём её ещё до 15 с, сигнал ей не шлём
+            for (var waited = 0; afterUpdate && !first && waited < 15_000; waited += 250)
+            {
+                instance.Dispose();
+                Thread.Sleep(250);
+                instance = new EventWaitHandle(false, EventResetMode.AutoReset, InstanceSignal, out first);
+            }
         }
         catch (UnauthorizedAccessException)
         {
@@ -27,6 +45,8 @@ internal static class Program
         using var signal = instance;
         if (!first)
         {
+            // после обновления сигнал не шлём: он открыл бы настройки старой версии
+            if (afterUpdate) return;
             // без MessageBox: его увидели бы зрители, просто открываем настройки уже запущенного чата
             // иначе настройки первого экземпляра откроются позади игры
             NativeMethods.AllowSetForegroundWindow(NativeMethods.AnyProcess);
@@ -44,7 +64,11 @@ internal static class Program
         };
         // исключения из меню трея идут мимо Dispatcher, без этого WinForms покажет окно ошибки в эфир
         System.Windows.Forms.Application.ThreadException += (_, e) => controller.Fail(e.Exception);
-        app.Startup += (_, _) => controller.Start();
+        app.Startup += (_, _) =>
+        {
+            controller.Start();
+            RemoveUpdateLeftovers();
+        };
         app.SessionEnding += (_, _) => controller.Dispose();
 
         var wait = ThreadPool.RegisterWaitForSingleObject(signal,
@@ -52,5 +76,31 @@ internal static class Program
 
         app.Run();
         wait.Unregister(null);
+    }
+
+    private static void WaitForExit(int pid)
+    {
+        try
+        {
+            using var old = Process.GetProcessById(pid);
+            old.WaitForExit(TimeSpan.FromSeconds(15));
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+            // процесса уже нет или ждать его нельзя: запускаемся сразу
+        }
+    }
+
+    private static void RemoveUpdateLeftovers()
+    {
+        if (Environment.ProcessPath is not { } exe) return;
+        try
+        {
+            UpdateInstaller.Cleanup(exe);
+        }
+        catch (Exception)
+        {
+            // остатки не мешают работе, удалим при следующем запуске
+        }
     }
 }

@@ -331,7 +331,7 @@ internal sealed class SettingsWindow : ProtectedWindow
     }
 
     // не ссылкой: открытый браузер увидели бы зрители
-    private static TextBox Address(string address) => new()
+    internal static TextBox Address(string address) => new()
     {
         Text = address,
         IsReadOnly = true,
@@ -701,7 +701,7 @@ internal sealed class SettingsWindow : ProtectedWindow
         panel.Children.Add(_updateBlock);
         panel.Children.Add(Address(UpdateChecker.DownloadPage));
         panel.Children.Add(Toggle("Проверять раз в сутки", _value.CheckUpdates, v => Change(s => s with { CheckUpdates = v })));
-        panel.Children.Add(Note("Запрос идёт на GitHub, он видит ваш IP. Сама программа ничего не скачивает и не запускает."));
+        panel.Children.Add(Note("Запрос идёт на GitHub, он видит ваш IP. О новой версии программа спросит вне эфира и обновится только по вашей кнопке."));
         panel.Children.Add(LeftButton("Проверить сейчас", () => UpdateCheckRequested?.Invoke()));
         return panel;
     }

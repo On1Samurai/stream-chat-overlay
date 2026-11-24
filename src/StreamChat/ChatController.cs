@@ -40,6 +40,16 @@ internal sealed class ChatController : IDisposable
     private SourceStatus _obsStatus = new(SourceHealth.Off, "выключено");
     private string _updateText = $"Установлена версия {UpdateNotifier.CurrentVersion}.";
     private string _announcedUpdate = "";
+    private readonly UpdatePrompt _prompt = new();
+    private readonly CancellationTokenSource _updateStop = new();
+    private UpdateWindow? _updateWindow;
+    private UpdateStage _updateStage;
+    private string _updateVersion = "";
+    private string _updateExe = "";
+    private bool _readyToSwap;
+    private bool _updateWindowBroken;
+    private bool _updateWindowClosed;
+    private TimeSpan _askedAt;
     private readonly Dictionary<Platform, SourceStatus> _sources = [];
     private readonly Dictionary<Platform, SourceStatus> _announced = [];
     private readonly bool _supported = CaptureGuard.IsSupported(Environment.OSVersion.Version);
@@ -69,7 +79,7 @@ internal sealed class ChatController : IDisposable
             Dispose();
             exit();
         };
-        _tray = new Tray(OpenSettings, Reconnect, AddTestMessage, SetPosition, ToggleEditing, ToggleHidden, SwitchProfile, _exit);
+        _tray = new Tray(OpenSettings, Reconnect, AddTestMessage, SetPosition, ToggleEditing, ToggleHidden, SwitchProfile, OpenUpdate, _exit);
         _timer.Tick += (_, _) =>
         {
             try
@@ -204,6 +214,8 @@ internal sealed class ChatController : IDisposable
         _updates.Dispose();
         foreach (var window in Windows()) window.Conceal();
         _settingsWindow?.Conceal();
+        _updateStop.Cancel();
+        _updateWindow?.Conceal();
         _hotKeys.Dispose();
         _tray.Dispose();
     }
@@ -222,12 +234,27 @@ internal sealed class ChatController : IDisposable
             _tray.Warn("Настройки закрыты: Windows сняла с них защиту от захвата.");
         }
 
+        if (_updateWindow is { IsVisible: true, IsExcluded: false })
+        {
+            _updateWindow.Conceal();
+            // вопрос в этом запуске больше сам не появится, скачивание и замена идут дальше
+            if (_updateStage == UpdateStage.Asking)
+            {
+                _prompt.Closed();
+                _updateStage = UpdateStage.None;
+            }
+
+            _updateWindowBroken = true;
+            _tray.Warn("Окно обновления закрыто: Windows сняла с него защиту от захвата.");
+        }
+
         // не на каждое сообщение: в большом чате их десятки в секунду
         if (_messagesChanged) RenderMessages();
         if (newSecond)
         {
             RenderViewers();
             RenderObs();
+            TickUpdate();
         }
 
         Sync();
@@ -274,7 +301,8 @@ internal sealed class ChatController : IDisposable
             _settingsWindow.UpdateCheckRequested += () =>
             {
                 _settingsWindow.SetUpdateText("Проверяю…");
-                _updates.CheckNow();
+                _updateWindowBroken = false;
+                _updates.CheckNow(UpdateCheckSource.Manual);
             };
             _settingsWindow.RecordingHotKey += recording =>
             {
@@ -479,13 +507,13 @@ internal sealed class ChatController : IDisposable
         Connect(force: false);
     }
 
-    private void OnUpdateChecked(UpdateResult result)
+    private void OnUpdateChecked(UpdateResult result, UpdateCheckSource source)
     {
         if (_stopped) return;
         var installed = $"Установлена версия {UpdateNotifier.CurrentVersion}.";
         _updateText = result.State switch
         {
-            UpdateState.Available => $"Вышла версия {result.Version}. {installed} Скачайте zip по адресу ниже, закройте программу и замените exe.",
+            UpdateState.Available => $"Вышла версия {result.Version}. {installed} Программа предложит обновиться вне эфира.",
             UpdateState.UpToDate => $"{installed} Она последняя.",
             UpdateState.NoReleases => $"{installed} Выпусков на GitHub пока нет.",
             _ => $"{installed} Проверить не удалось: нет связи с GitHub.",
@@ -494,9 +522,284 @@ internal sealed class ChatController : IDisposable
         if (result.State != UpdateState.Available) return;
 
         _tray.SetUpdate(result.Version);
+        _prompt.Found(result.Version, source);
         if (_announcedUpdate == result.Version) return;
         _announcedUpdate = result.Version;
-        Announce(Platform.App, $"вышла версия {result.Version}, адрес в настройках на вкладке «Поведение»");
+        Announce(Platform.App, $"вышла версия {result.Version}, программа предложит обновиться вне эфира");
+    }
+
+    private const string ReplaceFailed = "Не удалось заменить программу, оставлена прежняя версия.";
+    private static readonly TimeSpan QuestionWithoutObs = TimeSpan.FromSeconds(60);
+
+    private enum UpdateStage { None, Asking, Working, Failed }
+
+    /// <summary>Нет ни эфира, ни записи по данным OBS; null: OBS выключена в настройках или её состояние неизвестно.</summary>
+    private bool? ObsIdle()
+    {
+        var now = _clock.Elapsed;
+        return _settings.ObsEnabled && _obsBoard.IsKnown(now) ? _obsBoard.IsIdle(now) : null;
+    }
+
+    private void TickUpdate()
+    {
+        if (_stopped) return;
+        var idle = ObsIdle();
+        if (idle == false && _updateWindow is { IsVisible: true })
+        {
+            // эфир или запись: окно с экрана, начатое скачивание продолжается
+            _updateWindow.Conceal();
+            if (_updateStage == UpdateStage.Asking)
+            {
+                _prompt.Hidden();
+                _updateStage = UpdateStage.None;
+            }
+        }
+
+        // без OBS эфир не виден: вопрос без ответа не висит поверх игры, вернётся по пункту меню или «Проверить»
+        if (_updateStage == UpdateStage.Asking && !_settings.ObsEnabled && _clock.Elapsed - _askedAt >= QuestionWithoutObs)
+        {
+            _prompt.Closed();
+            _updateStage = UpdateStage.None;
+            _updateWindow?.Conceal();
+        }
+
+        if (_updateStage is UpdateStage.Working or UpdateStage.Failed)
+        {
+            // то же правило, что и для вопроса: с OBS только когда она точно сообщает, что эфира и записи нет.
+            // Без OBS замену разрешил сам щелчок «Обновить»
+            var allowed = !_settings.ObsEnabled || idle == true;
+            // у окна в работе нет кнопок: поверх игры его не оставляем, пока OBS не подтвердит, что эфира нет
+            if (_updateStage == UpdateStage.Working && !allowed && _updateWindow is { IsVisible: true }) _updateWindow.Conceal();
+            if (allowed && !_updateWindowBroken && !_updateWindowClosed && _updateWindow is { IsVisible: false }) ShowUpdateWindow();
+            if (!_readyToSwap || !allowed) return;
+            // замена перезапускает программу: открытые настройки потеряли бы несохранённые правки
+            if (_settingsOpen) _updateWindow?.Progress("Закройте настройки — программа обновится сразу после.");
+            else Install();
+            return;
+        }
+
+        if (_updateStage != UpdateStage.None || _updateWindowBroken) return;
+        if (_prompt.ShouldAsk(_settings.CheckUpdates, _settings.ObsEnabled, idle) is { } version) AskUpdate(version);
+    }
+
+    /// <summary>Пункт меню «Вышла версия …»: окно сразу, если OBS не сообщает об эфире или записи, иначе настройки.</summary>
+    private void OpenUpdate()
+    {
+        if (_stopped) return;
+        _updateWindowBroken = false;
+        if (_updateStage == UpdateStage.Working)
+        {
+            // окно в работе показываем по тому же правилу, что и замену
+            _updateWindowClosed = false;
+            if (!_settings.ObsEnabled || ObsIdle() == true) ShowUpdateWindow();
+            else OpenSettings();
+            return;
+        }
+
+        if (ObsIdle() == false || _announcedUpdate.Length == 0)
+        {
+            OpenSettings();
+            return;
+        }
+
+        if (_updateStage == UpdateStage.Failed)
+        {
+            ShowUpdateWindow();
+            return;
+        }
+
+        _prompt.Found(_announcedUpdate, UpdateCheckSource.Manual);
+        if (_updateStage == UpdateStage.None) AskUpdate(_announcedUpdate);
+    }
+
+    private void AskUpdate(string version)
+    {
+        if (_updateWindow is null)
+        {
+            _updateWindow = new UpdateWindow();
+            _updateWindow.UpdateRequested += StartUpdate;
+            _updateWindow.LaterRequested += () => EndUpdateQuestion(later: true);
+            _updateWindow.DismissRequested += () => EndUpdateQuestion(later: false);
+        }
+
+        _updateWindow.Ask(version, UpdateNotifier.CurrentVersion);
+        if (!ShowUpdateWindow()) return;
+        _updateVersion = version;
+        _updateStage = UpdateStage.Asking;
+        _askedAt = _clock.Elapsed;
+        _prompt.Asked();
+    }
+
+    private bool ShowUpdateWindow()
+    {
+        if (_stopped || _updateWindow is null) return false;
+        if (_updateWindow.IsVisible) return true;
+        var result = _updateWindow.ShowProtected();
+        if (result.Protected) return true;
+
+        // без этого попытка повторялась бы каждую секунду
+        _updateWindowBroken = true;
+        _tray.Warn($"Окно обновления не открыто: не включилась защита от захвата (код {result.Error}).");
+        return false;
+    }
+
+    private void EndUpdateQuestion(bool later)
+    {
+        if (_stopped) return;
+        if (_updateStage == UpdateStage.Working)
+        {
+            // закрытие не отменяет скачивание и замену: окно вернётся только с ошибкой или по пункту меню
+            if (later) return;
+            _updateWindowClosed = true;
+            _updateWindow?.Conceal();
+            return;
+        }
+
+        if (_updateStage is not (UpdateStage.Asking or UpdateStage.Failed)) return;
+        if (later) _prompt.Postpone();
+        else _prompt.Closed();
+        _updateStage = UpdateStage.None;
+        _updateWindow?.Conceal();
+    }
+
+    private async void StartUpdate()
+    {
+        if (_stopped || _updateStage != UpdateStage.Asking || _updateWindow is not { } window) return;
+        _updateWindowClosed = false;
+        // имя exe не угадываем: пользователь мог его переименовать
+        if (Environment.ProcessPath is not { } exe)
+        {
+            FailUpdate("Нет права менять файлы в папке программы.");
+            return;
+        }
+
+        try
+        {
+            // до скачивания: с таким именем замена всё равно не пройдёт
+            UpdateInstaller.RejectSideName(exe);
+        }
+        catch (IOException e)
+        {
+            FailUpdate(e.Message);
+            return;
+        }
+
+        _updateStage = UpdateStage.Working;
+        _updateExe = exe;
+        var version = _updateVersion;
+        var cancel = _updateStop.Token;
+        var downloading = true;
+        window.Progress("Скачиваю… 0 %");
+        // создан в потоке интерфейса: отчёты приходят сюда же
+        var progress = new Progress<int>(percent =>
+        {
+            if (!downloading || _stopped || _updateStage != UpdateStage.Working) return;
+            window.Progress($"Скачиваю… {percent} %");
+        });
+
+        try
+        {
+            using var downloader = new UpdateDownloader();
+            var folder = Path.GetDirectoryName(exe)!;
+            var result = await Task.Run(() => downloader.DownloadAsync(version, folder, progress, cancel), cancel);
+            downloading = false;
+            if (_stopped) return;
+            if (result.Error != DownloadError.None)
+            {
+                FailUpdate(DownloadErrorText(result.Error));
+                return;
+            }
+
+            window.Progress("Готовлю замену…");
+            await Task.Run(() => UpdateInstaller.Extract(result.ZipPath, exe), cancel);
+            if (_stopped) return;
+            // если замену можно сделать сразу, TickUpdate тут же сменит текст на «Перезапускаю…»
+            window.Progress("Обновлю, когда OBS сообщит, что эфира и записи нет.");
+            _readyToSwap = true;
+            TickUpdate();
+        }
+        catch (ArgumentException) when (downloading && !_stopped)
+        {
+            // rc и другие версии не по образцу x.y.z качать кнопкой нельзя
+            downloading = false;
+            FailUpdate("Эта версия не подходит для обновления кнопкой. Скачайте её вручную.");
+        }
+        catch (Exception)
+        {
+            downloading = false;
+            // при выходе остатки уберёт следующий запуск
+            if (_stopped || cancel.IsCancellationRequested) return;
+            UpdateInstaller.Cleanup(exe);
+            FailUpdate(ReplaceFailed);
+        }
+    }
+
+    private static string DownloadErrorText(DownloadError error) => error switch
+    {
+        DownloadError.NoWriteAccess => "Нет права менять файлы в папке программы.",
+        DownloadError.Network => "Не удалось скачать. Проверьте интернет.",
+        DownloadError.TooLarge => "Файл обновления подозрительно большой, обновление отменено.",
+        DownloadError.NoSignature => "У этой версии нет подписи. Скачайте её вручную.",
+        DownloadError.BadSignature => "Подпись не совпала, файл удалён. Скачайте версию со страницы.",
+        DownloadError.WriteFailed => "Не удалось записать файл обновления (места на диске?).",
+        _ => ReplaceFailed,
+    };
+
+    private void Install()
+    {
+        _readyToSwap = false;
+        var exe = _updateExe;
+        _updateWindow?.Progress("Перезапускаю…");
+        try
+        {
+            UpdateInstaller.Swap(exe);
+        }
+        catch (UpdateRollbackException e)
+        {
+            // Cleanup стёр бы StreamChat.old.exe, единственную рабочую копию
+            FailUpdate(e.Message);
+            return;
+        }
+        catch (Exception)
+        {
+            UpdateInstaller.Cleanup(exe);
+            FailUpdate(ReplaceFailed);
+            return;
+        }
+
+        try
+        {
+            using var started = Process.Start(new ProcessStartInfo(exe, $"--after-update {Environment.ProcessId}") { UseShellExecute = false });
+        }
+        catch (Exception)
+        {
+            try
+            {
+                UpdateInstaller.Restore(exe);
+            }
+            catch (Exception e)
+            {
+                FailUpdate(new UpdateRollbackException(Path.GetFileName(exe), e).Message);
+                return;
+            }
+
+            UpdateInstaller.Cleanup(exe);
+            FailUpdate(ReplaceFailed);
+            return;
+        }
+
+        _exit();
+    }
+
+    private void FailUpdate(string reason)
+    {
+        if (_stopped) return;
+        _readyToSwap = false;
+        _updateStage = UpdateStage.Failed;
+        _updateWindow?.Failed(reason);
+        // окно не показать или его закрыли во время работы (стример мог уйти в игру): причина в уведомлении,
+        // окно с ошибкой открывается пунктом меню. Путей и текста чата в причине нет
+        if (_updateWindowBroken || _updateWindowClosed) _tray.Warn(reason);
     }
 
     private void Connect(bool force)
